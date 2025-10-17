@@ -53,9 +53,9 @@ bootstrap/
 ## Konfiguration (`bootstrap.yaml`)
 
 ```yaml
-clusterName: dev                    # Name des KIND-Clusters
+clusterName: dev-cluster            # Name des KIND-Clusters
 kindConfig: kind-config/kind-simple.yaml
-domain: pdn                         # Zweite Ebene für Ingress-Domains
+domain: kind                        # Zweite Ebene für Ingress-Domains
 topLevelDomain: lab                 # Top-Level-Domain
 metallbAddressRange:                # Optionaler Override (z. B. "172.18.0.200-172.18.0.250")
 caCommonName: KinD Dev Root CA      # Subject CN für die generierte Root-CA
