@@ -1,0 +1,27 @@
+# Operating system junk
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Editor / IDE folders
+.idea/
+.vscode/
+*.code-workspace
+
+# Editor swap/backup files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# Environment & local overrides
+.env
+.env.*
+!.env.example
+
+# Kubernetes / kind artifacts
+kubeconfig
+*.kubeconfig
+bootstrap/CA/

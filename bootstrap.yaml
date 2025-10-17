@@ -1,0 +1,8 @@
+clusterName: dev-cluster
+kindConfig: kind-config/kind-simple.yaml
+domain: kind
+topLevelDomain: lab
+metallbAddressRange:
+caCommonName: KinD Dev Root CA
+caOrganization: KinD Dev Lab
+caValidityDays: 3650
