@@ -1,0 +1,247 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sso
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db-credentials
+  namespace: sso
+type: Opaque
+stringData:
+  POSTGRES_DB: keycloak
+  POSTGRES_USER: keycloak
+  POSTGRES_PASSWORD: supersecret
+  KC_DB_USERNAME: keycloak
+  KC_DB_PASSWORD: supersecret
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keycloak-postgres-pvc
+  namespace: sso
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-postgres
+  namespace: sso
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak-postgres
+  template:
+    metadata:
+      labels:
+        app: keycloak-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: POSTGRES_PASSWORD
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: keycloak-postgres-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-postgres
+  namespace: sso
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: sso
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:25.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - start-dev
+
+          env:
+            # Admin-User (Test)
+            - name: KEYCLOAK_ADMIN
+              value: admin
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: admin
+
+            # DB-Konfiguration
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL_HOST
+              value: keycloak-postgres
+            - name: KC_DB_URL_PORT
+              value: "5432"
+            - name: KC_DB_URL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: POSTGRES_DB
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: KC_DB_USERNAME
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-credentials
+                  key: KC_DB_PASSWORD
+
+            # Externer Hostname
+            - name: KC_HOSTNAME
+              value: keycloak.kind.lab
+
+            # WICHTIG: Keycloak korrekt hinter TLS-terminierendem Proxy betreiben
+            - name: KC_PROXY
+              value: edge
+            # Hostname-Strictness lockern, damit X-Forwarded-* vom Ingress akzeptiert werden
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "false"
+
+            # Health Checks aktivieren
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_HTTP_MANAGEMENT_HEALTH_ENABLED
+              value: "true"
+
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9000
+              name: http-management
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 9000
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 10
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: sso
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: sso
+  annotations:
+    cert-manager.io/cluster-issuer: local-ca-issuer
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - keycloak.kind.lab
+      secretName: keycloak-tls
+  rules:
+    - host: keycloak.kind.lab
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 80
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: keycloak-cert
+  namespace: sso
+spec:
+  secretName: keycloak-tls
+  dnsNames:
+    - keycloak.kind.lab
+  issuerRef:
+    name: local-ca-issuer
+    kind: ClusterIssuer
