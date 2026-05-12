@@ -149,7 +149,7 @@ spec:
             # WICHTIG: Keycloak korrekt hinter TLS-terminierendem Proxy betreiben
             - name: KC_PROXY
               value: edge
-            # Hostname-Strictness lockern, damit X-Forwarded-* vom Ingress akzeptiert werden
+            # Hostname-Strictness lockern, damit X-Forwarded-* vom Gateway akzeptiert werden
             - name: KC_HOSTNAME_STRICT
               value: "false"
             - name: KC_HOSTNAME_STRICT_HTTPS
@@ -208,30 +208,26 @@ spec:
       targetPort: 8080
       protocol: TCP
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
   name: keycloak
   namespace: sso
-  annotations:
-    cert-manager.io/cluster-issuer: local-ca-issuer
 spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - keycloak.kind.lab
-      secretName: keycloak-tls
+  parentRefs:
+    - name: local-gateway
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - keycloak.kind.lab
   rules:
-    - host: keycloak.kind.lab
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 80
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: keycloak
+          port: 80
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

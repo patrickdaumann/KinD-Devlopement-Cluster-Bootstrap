@@ -281,7 +281,7 @@ configs:
     ## Server properties
     # -- Run server without TLS
     ## NOTE: This value should be set when you generate params by other means as it changes ports used by ingress template.
-    server.insecure: false
+    server.insecure: true
     # -- Value for base href in index.html. Used if Argo CD is running behind reverse proxy under subpath different from /
     server.basehref: /
     # -- Used if Argo CD is running behind reverse proxy under subpath different from /
@@ -2224,7 +2224,7 @@ server:
   # Argo CD server ingress configuration
   ingress:
     # -- Enable an ingress resource for the Argo CD server
-    enabled: true
+    enabled: false
     # -- Specific implementation for ingress controller. One of `generic`, `aws` or `gke`
     ## Additional configuration might be required in related configuration sections
     controller: generic
@@ -2232,13 +2232,9 @@ server:
     labels: {}
     # -- Additional ingress annotations
     ## Ref: https://argo-cd.readthedocs.io/en/stable/operator-manual/ingress/#option-1-ssl-passthrough
-    annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-      cert-manager.io/cluster-issuer: "local-ca-issuer"
+    annotations: {}
     # -- Defines which ingress controller will implement the resource
-    ingressClassName: "nginx"
+    ingressClassName: ""
 
     # -- Argo CD server hostname
     # @default -- `""` (defaults to global.domain)

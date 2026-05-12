@@ -589,15 +589,13 @@ alertmanager:
   #       {{ end }}
 
   ingress:
-    enabled: true
+    enabled: false
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    ingressClassName: nginx
+    ingressClassName: ""
 
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       cert-manager.io/cluster-issuer: "local-ca-issuer"
 
     labels: {}
@@ -684,7 +682,7 @@ alertmanager:
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    ingressClassName: nginx
+    ingressClassName: ""
 
     annotations: {}
     labels: {}
@@ -1254,19 +1252,17 @@ grafana:
   ingress:
     ## If true, Grafana Ingress will be created
     ##
-    enabled: true
+    enabled: false
 
     ## IngressClassName for Grafana Ingress.
     ## Should be provided if Ingress is enable.
     ##
-    ingressClassName: nginx
+    ingressClassName: ""
 
     ## Annotations for Grafana Ingress
     ##
     
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       cert-manager.io/cluster-issuer: "local-ca-issuer"
 
 
@@ -3592,7 +3588,7 @@ prometheus:
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    #ingressClassName: nginx
+    #ingressClassName: ""
 
     annotations: {}
     labels: {}
@@ -3638,15 +3634,13 @@ prometheus:
   #     someoneelse:$apr1$DMZX2Z4q$6SbQIfyuLQd.xmo/P0m2c.
 
   ingress:
-    enabled: true
+    enabled: false
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    ingressClassName: nginx
+    ingressClassName: ""
 
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       cert-manager.io/cluster-issuer: "local-ca-issuer"
     
     labels: {}
@@ -3728,7 +3722,7 @@ prometheus:
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    # ingressClassName: nginx
+    # ingressClassName: ""
 
     annotations: {}
     labels: {}
@@ -4814,15 +4808,13 @@ thanosRuler:
     maxUnavailable: ""
 
   ingress:
-    enabled: true
+    enabled: false
 
     # For Kubernetes >= 1.18 you should specify the ingress-controller via the field ingressClassName
     # See https://kubernetes.io/blog/2020/04/02/improvements-to-the-ingress-api-in-kubernetes-1.18/#specifying-the-class-of-an-ingress
-    ingressClassName: nginx
+    ingressClassName: ""
 
     annotations:
-      nginx.ingress.kubernetes.io/ssl-redirect: "true"
-      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
       cert-manager.io/cluster-issuer: "local-ca-issuer"
     
 

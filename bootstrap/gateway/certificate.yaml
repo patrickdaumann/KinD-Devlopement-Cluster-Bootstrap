@@ -1,0 +1,13 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: local-gateway-wildcard
+  namespace: envoy-gateway-system
+spec:
+  secretName: local-gateway-wildcard-tls
+  dnsNames:
+    - "*.__INGRESS_BASE_DOMAIN__"
+    - "__INGRESS_BASE_DOMAIN__"
+  issuerRef:
+    name: local-ca-issuer
+    kind: ClusterIssuer

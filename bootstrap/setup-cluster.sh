@@ -8,6 +8,8 @@ cd "$SCRIPT_DIR"
 
 # Version-Pin für reproduzierbare Cluster-Bootstraps.
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.15.3}"
+GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.3.0}"
+ENVOY_GATEWAY_VERSION="${ENVOY_GATEWAY_VERSION:-v1.5.0}"
 # Optional: IP-Range für MetalLB überschreiben (z.B. METALLB_ADDRESS_RANGE="172.18.255.200-172.18.255.250").
 METALLB_ADDRESS_RANGE="${METALLB_ADDRESS_RANGE:-}"
 METALLB_IP_POOL_NAME="loadbalancerpool"
@@ -97,7 +99,7 @@ CA_KEY_PATH="$CA_DIR/ca.key"
 echo "ℹ️  Konfiguration:"
 echo "   KIND-Cluster: ${CLUSTER_NAME}"
 echo "   KIND-Config : ${KIND_CONFIG_PATH}"
-echo "   Ingress-Domain: *.${INGRESS_BASE_DOMAIN}"
+echo "   Gateway-Domain: *.${INGRESS_BASE_DOMAIN}"
 if [[ -n "$METALLB_ADDRESS_RANGE" ]]; then
   echo "   MetalLB-Range (fix): ${METALLB_ADDRESS_RANGE}"
 else
@@ -133,9 +135,140 @@ render_template() {
   tmp="$(mktemp)"
   sed \
     -e "s/__INGRESS_BASE_DOMAIN__/${INGRESS_BASE_DOMAIN//\//\\/}/g" \
+    -e "s/__INGRESS_BASE_DOMAIN_REGEX__/${INGRESS_BASE_DOMAIN//./\\.}/g" \
+    -e "s/__GATEWAY_LB_IP__/${GATEWAY_LB_IP:-}/g" \
     "$template_file" > "$tmp"
   TEMP_FILES+=("$tmp")
   echo "$tmp"
+}
+
+apply_template() {
+  local template_file=$1
+  kubectl apply -f "$(render_template "$template_file")"
+}
+
+apply_template_dir() {
+  local template_dir=$1
+  local file
+  while IFS= read -r file; do
+    apply_template "$file"
+  done < <(find "$template_dir" -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+}
+
+wait_gateway_address() {
+  local namespace=${1:-envoy-gateway-system}
+  local name=${2:-local-gateway}
+  local timeout=${3:-180}
+  local end_time=$((SECONDS + timeout))
+
+  echo "⌛ Warte auf Gateway LoadBalancer-IP..."
+  while (( SECONDS < end_time )); do
+    local programmed address
+    programmed="$(kubectl get gateway -n "$namespace" "$name" -o jsonpath='{range .status.conditions[?(@.type=="Programmed")]}{.status}{end}' 2>/dev/null || true)"
+    address="$(kubectl get gateway -n "$namespace" "$name" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)"
+    if [[ "$programmed" == "True" && -n "$address" ]]; then
+      GATEWAY_LB_IP="$address"
+      export GATEWAY_LB_IP
+      echo "✅ Gateway LoadBalancer-IP: ${GATEWAY_LB_IP}"
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "❌ Fehler: Gateway '$namespace/$name' hat keine programmierte LoadBalancer-IP erhalten."
+  kubectl get gateway -n "$namespace" "$name" -o wide || true
+  exit 1
+}
+
+wait_service_lb_address() {
+  local namespace=$1
+  local name=$2
+  local timeout=${3:-120}
+  local end_time=$((SECONDS + timeout))
+
+  echo "⌛ Warte auf LoadBalancer-IP für Service '$namespace/$name'..."
+  while (( SECONDS < end_time )); do
+    local address
+    address="$(kubectl get svc -n "$namespace" "$name" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+    if [[ -n "$address" ]]; then
+      echo "$address"
+      return 0
+    fi
+    sleep 3
+  done
+
+  return 1
+}
+
+detect_kind_bridge_interface() {
+  local network_id bridge_name
+  network_id="$(docker network inspect kind -f '{{.Id}}' 2>/dev/null || true)"
+  if [[ -n "$network_id" ]]; then
+    bridge_name="br-${network_id:0:12}"
+    if ip link show "$bridge_name" >/dev/null 2>&1; then
+      echo "$bridge_name"
+      return 0
+    fi
+  fi
+
+  ip -br link 2>/dev/null | awk '/^br-/ {print $1; exit}' || true
+}
+
+print_dns_quickstart() {
+  local dns_ip=$1
+  local gateway_ip=$2
+  local bridge_if
+  bridge_if="$(detect_kind_bridge_interface)"
+
+  echo ""
+  echo "==========================================="
+  echo "🌐 DNS Quickstart für dieses System"
+  echo "==========================================="
+  echo "Domain:       *.${INGRESS_BASE_DOMAIN}"
+  echo "DNS-IP:       ${dns_ip}"
+  echo "Gateway-IP:   ${gateway_ip}"
+  echo "Grafana URL:  https://grafana.${INGRESS_BASE_DOMAIN}"
+  echo "Argo CD URL:  https://argocd.${INGRESS_BASE_DOMAIN}"
+  echo ""
+
+  case "$(uname -s)" in
+    Linux)
+      if command -v resolvectl >/dev/null 2>&1; then
+        echo "Linux/systemd-resolved:"
+        if [[ -n "$bridge_if" ]]; then
+          echo "  sudo resolvectl dns ${bridge_if} ${dns_ip}"
+          echo "  sudo resolvectl domain ${bridge_if} '~${INGRESS_BASE_DOMAIN}'"
+          echo "  resolvectl flush-caches"
+          echo "  resolvectl query grafana.${INGRESS_BASE_DOMAIN}"
+          echo ""
+          echo "Optional alias:"
+          echo "  alias enable-kind-dns='sudo resolvectl dns ${bridge_if} ${dns_ip} && sudo resolvectl domain ${bridge_if} \"~${INGRESS_BASE_DOMAIN}\"'"
+        else
+          echo "  # Docker bridge nicht automatisch erkannt. Interface mit 'ip -br addr | grep br-' suchen."
+          echo "  sudo resolvectl dns <bridge-interface> ${dns_ip}"
+          echo "  sudo resolvectl domain <bridge-interface> '~${INGRESS_BASE_DOMAIN}'"
+        fi
+      else
+        echo "Linux: systemd-resolved nicht erkannt. Verwende DNS-IP ${dns_ip} für Split-DNS auf ~${INGRESS_BASE_DOMAIN}."
+      fi
+      ;;
+    Darwin)
+      echo "macOS:"
+      echo "  sudo mkdir -p /etc/resolver"
+      echo "  printf 'nameserver ${dns_ip}\\n' | sudo tee /etc/resolver/${INGRESS_BASE_DOMAIN}"
+      echo "  sudo dscacheutil -flushcache"
+      echo "  dig grafana.${INGRESS_BASE_DOMAIN}"
+      echo "  open https://grafana.${INGRESS_BASE_DOMAIN}"
+      ;;
+    *)
+      echo "DNS konfigurieren: ${dns_ip} als Resolver für ~${INGRESS_BASE_DOMAIN} verwenden."
+      ;;
+  esac
+
+  echo ""
+  echo "Fallback /etc/hosts:"
+  echo "  echo '${gateway_ip} argocd.${INGRESS_BASE_DOMAIN} grafana.${INGRESS_BASE_DOMAIN} prometheus.${INGRESS_BASE_DOMAIN} alertmanager.${INGRESS_BASE_DOMAIN}' | sudo tee -a /etc/hosts"
+  echo ""
 }
 
 require_commands() {
@@ -373,16 +506,18 @@ echo "==========================================="
 echo "⚙️  0. Helm Repositories vorbereiten..."
 echo "==========================================="
 helm repo add metallb https://metallb.github.io/metallb --force-update
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx --force-update
 helm repo add argo https://argoproj.github.io/argo-helm --force-update
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
-helm repo add k8s_gateway https://ori-edge.github.io/k8s_gateway/ --force-update
 helm repo update
 
 echo "==========================================="
 echo "🔧 1. Create KIND Cluster..."
 echo "==========================================="
-kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG_PATH"
+if kind get clusters | grep -Fxq "$CLUSTER_NAME"; then
+  echo "ℹ️  KIND Cluster '$CLUSTER_NAME' existiert bereits, überspringe Erstellung."
+else
+  kind create cluster --name "$CLUSTER_NAME" --config "$KIND_CONFIG_PATH"
+fi
 
 echo "==========================================="
 echo "🔧 2. Installing MetalLB..."
@@ -403,12 +538,17 @@ kubectl apply -f ./metallb/l2advertisement.yaml
 echo "✅ IPAddressPool und L2Advertisement erfolgreich angewendet."
 
 echo "==========================================="
-echo "🔧 3. Installing NGINX Ingress Controller..."
+echo "🔧 3. Installing Gateway API CRDs + Envoy Gateway..."
 echo "==========================================="
-helm upgrade --install nginx-ingress ingress-nginx/ingress-nginx --create-namespace --namespace ingress-nginx
+kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+helm upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
+  --version "${ENVOY_GATEWAY_VERSION}" \
+  --skip-crds \
+  --create-namespace \
+  --namespace envoy-gateway-system
 
-echo "✅ NGINX Ingress Controller Installation gestartet."
-check_pods_ready "ingress-nginx" 120 24 5
+echo "✅ Envoy Gateway Installation gestartet."
+check_pods_ready "envoy-gateway-system" 120 24 5
 
 echo "==========================================="
 echo "🔧 4. Installing Cert-Manager + Cluster-Issuer"
@@ -430,6 +570,13 @@ echo "✅ CA Secret erfolgreich angewendet."
 echo "20 Sekunden Warten vor Cluster Issuer..."
 sleep 20
 kubectl apply -f ./cert-manager/cluster-issuer.yaml
+
+kubectl create namespace envoy-gateway-system --dry-run=client -o yaml | kubectl apply -f -
+echo "🌐 Gateway TLS-Zertifikat und Shared Gateway anwenden..."
+apply_template "$SCRIPT_DIR/gateway/gatewayclass.yaml"
+apply_template "$SCRIPT_DIR/gateway/certificate.yaml"
+kubectl wait --for=condition=Ready certificate/local-gateway-wildcard -n envoy-gateway-system --timeout=180s
+apply_template "$SCRIPT_DIR/gateway/gateway.yaml"
 
 echo "==========================================="
 echo "🚀 5. ArgoCD installieren"
@@ -468,6 +615,8 @@ echo "neustarten des ArgoCD Pods - damit Passwort erneuert wird"
 # 🔁 ArgoCD Server neu starten
 kubectl -n argocd delete pod -l app.kubernetes.io/name=argocd-server --ignore-not-found --wait=false
 
+apply_template "$SCRIPT_DIR/gateway/routes/argocd-httproute.yaml"
+
 echo "https://argocd.${INGRESS_BASE_DOMAIN}"
 echo "checkout Workloads at: https://gitlab.com/patrickdaumann/kind-lab-argocd"
 
@@ -480,11 +629,27 @@ helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheu
   --values "$(render_template "$SCRIPT_DIR/kube-prometheus-stack/values.yaml")"
 
 check_pods_ready "monitoring" 120 24 5
+apply_template_dir "$SCRIPT_DIR/gateway/routes/monitoring"
 
 echo "==========================================="
-echo "🚀 7. Setup Local DNS (ExDNS-Gateway) for local external Name Resolution"
+echo "🚀 7. Setup Local DNS for local external Name Resolution"
 echo "==========================================="
-helm upgrade --install exdns k8s_gateway/k8s-gateway --set domain="${INGRESS_BASE_DOMAIN}"
-echo "Add: nameserver <Loadbalancer IP of Coredns> to /etc/resolver/${INGRESS_BASE_DOMAIN} to enable DNS Resolution of Cluster Services"
+wait_gateway_address "envoy-gateway-system" "local-gateway" 180
+if helm status exdns >/dev/null 2>&1; then
+  helm uninstall exdns
+fi
+apply_template "$SCRIPT_DIR/local-dns.yaml"
+kubectl rollout status deploy/exdns-k8s-gateway --timeout=120s
+DNS_LB_IP="$(wait_service_lb_address default exdns-k8s-gateway 120 || true)"
+DNS_LB_IP="$(echo "$DNS_LB_IP" | tail -n1)"
+if [[ -z "$DNS_LB_IP" ]]; then
+  echo "❌ Fehler: Local-DNS Service hat keine LoadBalancer-IP erhalten."
+  kubectl get svc exdns-k8s-gateway || true
+  exit 1
+fi
+
+print_dns_quickstart "$DNS_LB_IP" "$GATEWAY_LB_IP"
+echo "Gateway status: kubectl get gateway -n envoy-gateway-system local-gateway"
+echo "Gateway LoadBalancer Services: kubectl get svc -n envoy-gateway-system"
 
 echo "✅ Alles fertig!"
