@@ -17,8 +17,9 @@ Lokales Bootstrap-Skript für eine voll ausgestattete KIND-Spielwiese inklusive 
 - **Gateway API + Envoy Gateway** – ersetzt Ingress-NGINX als lokaler HTTP/HTTPS-Routing-Layer.
 - **Cert-Manager** – verwaltet Zertifikate und liefert einen ClusterIssuer (`bootstrap/cert-manager`).
 - **Custom CA** – wird beim Bootstrap automatisch erzeugt (`bootstrap/CA` bleibt leer im Repo).
-- **Argo CD** – GitOps-Controller inklusive HTTPRoute (`bootstrap/argo-cd`, Gateway-Routen werden zur Laufzeit parametrisiert).
-- **kube-prometheus-stack** – Monitoring mit Prometheus, Grafana, Alertmanager (`bootstrap/kube-prometheus-stack`).
+- **Keycloak** – lokaler OIDC Provider für Grafana und Argo CD (`bootstrap/keycloak`).
+- **Argo CD** – GitOps-Controller inklusive HTTPRoute und Keycloak-OIDC (`bootstrap/argo-cd`).
+- **kube-prometheus-stack** – Monitoring mit Prometheus, Grafana, Alertmanager und Grafana-Keycloak-OIDC (`bootstrap/kube-prometheus-stack`).
 - **Lokales DNS** – CoreDNS-basierter lokaler DNS-Layer für `*.<domain>.<tld>` auf die Gateway-IP.
 
 Repository-Layout:
@@ -31,6 +32,7 @@ bootstrap/
  ├─ kind-config/            # KIND-Cluster-Konfigurationen
  ├─ metallb/                # Default-IP-Pool & L2Advertisement
  ├─ gateway/                # Gateway, TLS-Zertifikat und HTTPRoutes
+ ├─ keycloak/               # Keycloak, Postgres und Realm/OIDC-Bootstrap
  ├─ argo-cd/                # Helm values (Platzhalter für Domains)
  └─ kube-prometheus-stack/  # Helm values (Platzhalter für Domains)
 ```
@@ -92,20 +94,44 @@ Alle Werte lassen sich zur Laufzeit über Umgebungsvariablen überschreiben (`CL
    - Das Skript erzeugt automatisch ein neues CA-Zertifikat/-Key (RSA 4096) und erstellt daraus das Secret `ca-key-pair`.  
    - Anschließend wird der ClusterIssuer angewendet.
 
-7. **Argo CD**  
-   Helm-Installation mit gerenderten Values (`argocd.<domain>.<tld>`).  
-   Admin-Passwort wird per Secret gesetzt und der Server-Pod neugestartet.
+7. **Keycloak**  
+   Installation von Keycloak + Postgres, HTTPRoute `keycloak.<domain>.<tld>` und idempotenter Bootstrap des Realms `kind-lab` mit OIDC-Clients für Grafana und Argo CD.
 
-8. **Monitoring (kube-prometheus-stack)**  
-   Helm-Release ohne Ingress-Ressourcen; externe Zugriffe erfolgen über gerenderte HTTPRoutes (`grafana.<domain>.<tld>`, `prometheus.<domain>.<tld>` …).
+8. **Argo CD**  
+   Helm-Installation mit gerenderten Values (`argocd.<domain>.<tld>`) und Keycloak-OIDC.  
+   Lokaler Admin bleibt als Fallback aktiv.
 
-9. **Lokales DNS**  
+9. **Monitoring (kube-prometheus-stack)**  
+   Helm-Release ohne Ingress-Ressourcen; Grafana nutzt Keycloak-OIDC, externe Zugriffe erfolgen über gerenderte HTTPRoutes (`grafana.<domain>.<tld>`, `prometheus.<domain>.<tld>` …).
+
+10. **Lokales DNS**  
    Installiert einen kleinen CoreDNS-Resolver, der `*.<domain>.<tld>` auf die Gateway-LoadBalancer-IP auflöst, und gibt den nötigen Resolver-Eintrag aus.
 
-10. **Ausgabe der wichtigsten URLs**  
-    Das Skript gibt u. a. die Argo-CD-URL zurück: `https://argocd.<domain>.<tld>`.
+11. **Ausgabe der wichtigsten URLs**  
+    Das Skript gibt u. a. Keycloak-, Grafana- und Argo-CD-URLs sowie die SSO-Testdaten zurück.
 
-Die Helm-Values deaktivieren die bisherigen Ingress-Ressourcen. Gateway-, Certificate- und HTTPRoute-Manifeste tragen Platzhalter, die das Skript vor dem Anwenden ersetzt.
+Die Helm-Values deaktivieren die bisherigen Ingress-Ressourcen. Gateway-, Certificate-, HTTPRoute-, Keycloak- und OIDC-Manifeste tragen Platzhalter, die das Skript vor dem Anwenden ersetzt.
+
+---
+
+## SSO/OIDC-Details
+
+Keycloak wird als lokaler OIDC-Provider für **Grafana** und **Argo CD** eingerichtet.
+
+| Wert | Standard |
+|------|----------|
+| Realm | `kind-lab` |
+| Gruppe mit Admin-Rechten | `platform-admins` |
+| Testuser | `admin` / `admin` |
+| Testuser-E-Mail | `admin@kind.local` |
+| Grafana Client | `grafana` |
+| Argo CD Client | `argocd` |
+
+Hinweise:
+- Grafana und Argo CD fordern nur die OIDC-Scopes `openid`, `profile`, `email` an. Die Gruppen werden über einen Keycloak-Protokoll-Mapper als `groups` Claim ausgegeben.
+- Grafana verwendet `email` als Login-Attribut, damit der Keycloak-User `admin` nicht mit dem lokalen Grafana-Admin kollidiert.
+- Prometheus und Alertmanager bleiben bewusst ohne Keycloak-Login, damit das Setup leichtgewichtig bleibt.
+- Die lokalen Client-Secrets und Standardpasswörter sind nur für lokale Entwicklung gedacht.
 
 ---
 
@@ -116,8 +142,10 @@ Die Helm-Values deaktivieren die bisherigen Ingress-Ressourcen. Gateway-, Certif
 | **Gateway-Domains auflösen** | Siehe DNS-Quickstart unten. Alternativ `/etc/hosts` temporär erweitern. |
 | **CA vertrauen** | `bootstrap/CA/ca.crt` nach dem Bootstrap importieren; siehe CA-Trust-Quickstart unten. |
 | **Status prüfen** | `kubectl get nodes`, `kubectl get pods -A`. |
-| **Argo CD UI** | `https://argocd.<domain>.<tld>` – das Passwort steht als bcrypt-Hash im Skript (`ADMIN_HASH`). |
-| **Grafana** | `https://grafana.<domain>.<tld>` – Standard-Login gemäß `kube-prometheus-stack/values.yaml`. |
+| **Keycloak** | `https://keycloak.<domain>.<tld>` – lokaler SSO-Provider. |
+| **SSO-Testuser** | Standard: `admin` / `admin`, E-Mail `admin@kind.local`, Realm `kind-lab`, Gruppe `platform-admins` (**nur lokale Entwicklung**). |
+| **Argo CD UI** | `https://argocd.<domain>.<tld>` – Login via Keycloak; lokaler Admin bleibt als Fallback aktiv. |
+| **Grafana** | `https://grafana.<domain>.<tld>` – Login via Keycloak; Grafana nutzt die Keycloak-E-Mail als Login, um Konflikte mit dem lokalen `admin` zu vermeiden. |
 | **Cluster entfernen** | `kind delete cluster --name <clusterName>`. |
 
 ---
@@ -233,6 +261,12 @@ open https://grafana.kind.lab
   - `kubectl get gateway -A` und `kubectl get httproute -A` prüfen.  
   - `kubectl get svc -n envoy-gateway-system` liefert die LoadBalancer-IP.
 
+- **Keycloak/OIDC Login schlägt fehl**  
+  - Browser-Cookies für `keycloak.<domain>.<tld>`, `grafana.<domain>.<tld>` und `argocd.<domain>.<tld>` löschen oder privates Fenster nutzen.  
+  - Realm-Bootstrap prüfen: `kubectl -n sso logs job/keycloak-bootstrap-realm`.  
+  - Keycloak-Status prüfen: `kubectl get pods -n sso`.  
+  - Argo CD/Grafana-Konfiguration prüfen: `kubectl get cm -n argocd argocd-cm -o yaml` und `kubectl logs -n monitoring deploy/kube-prometheus-stack-grafana -c grafana`.
+
 - **Browser meldet Zertifikatsfehler**  
   - `bootstrap/CA/ca.crt` importieren oder neue CA generieren (lösche `bootstrap/CA/*` und starte das Skript erneut).
 
@@ -257,8 +291,13 @@ open https://grafana.kind.lab
 | `bootstrap/kind-config/*.yaml` | Alternative KIND-Cluster-Topologien. |
 | `bootstrap/gateway/*.yaml` | Shared Gateway und wildcard TLS-Zertifikat. |
 | `bootstrap/gateway/routes/**/*.yaml` | HTTPRoutes für Argo CD und Monitoring. |
-| `bootstrap/argo-cd/values.yaml` | Helm-Values ohne Ingress-Erzeugung. |
-| `bootstrap/kube-prometheus-stack/values.yaml` | Monitoring-Werte ohne Ingress-Erzeugung. |
+| `bootstrap/keycloak/*.yaml` | Keycloak, Postgres und Realm/OIDC-Bootstrap. |
+| `KEYCLOAK_REALM` | Realm-Name, Standard `kind-lab`. |
+| `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` | Lokaler Keycloak-Admin und SSO-Testuser, Standard `admin` / `admin`. |
+| `KEYCLOAK_DB_PASSWORD` | Lokales Postgres-Passwort für Keycloak, Standard `keycloak-local-dev-password`. |
+| `OIDC_GRAFANA_CLIENT_SECRET` / `OIDC_ARGOCD_CLIENT_SECRET` | Lokale OIDC-Client-Secrets. |
+| `bootstrap/argo-cd/values.yaml` | Helm-Values ohne Ingress-Erzeugung, mit Keycloak-OIDC. |
+| `bootstrap/kube-prometheus-stack/values.yaml` | Monitoring-Werte ohne Ingress-Erzeugung, mit Grafana-Keycloak-OIDC. |
 
 ---
 

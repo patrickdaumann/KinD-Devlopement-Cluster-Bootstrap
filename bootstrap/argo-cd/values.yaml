@@ -96,7 +96,10 @@ global:
   #  fsGroup: 999
 
   # -- Mapping between IP and hostnames that will be injected as entries in the pod's hosts files
-  hostAliases: []
+  hostAliases:
+    - ip: __GATEWAY_LB_IP__
+      hostnames:
+        - keycloak.__INGRESS_BASE_DOMAIN__
   # - ip: 10.20.30.40
   #   hostnames:
   #   - git.myhostname
@@ -191,6 +194,18 @@ configs:
     # -- Enable local admin user
     ## Ref: https://argo-cd.readthedocs.io/en/latest/faq/#how-to-disable-admin-user
     admin.enabled: true
+
+    url: https://argocd.__INGRESS_BASE_DOMAIN__
+    oidc.tls.insecure.skip.verify: "true"
+    oidc.config: |
+      name: Keycloak
+      issuer: https://keycloak.__INGRESS_BASE_DOMAIN__/realms/__KEYCLOAK_REALM__
+      clientID: argocd
+      clientSecret: $oidc.keycloak.clientSecret
+      requestedScopes:
+        - openid
+        - profile
+        - email
 
     # -- Timeout to discover if a new manifests version got published to the repository
     timeout.reconciliation: 180s
@@ -336,11 +351,12 @@ configs:
 
     # -- The name of the default role which Argo CD will falls back to, when authorizing API requests (optional).
     # If omitted or empty, users may be still be able to login, but will see no apps, projects, etc...
-    policy.default: ''
+    policy.default: 'role:readonly'
 
     # -- File containing user-defined policies and role definitions.
     # @default -- `''` (See [values.yaml])
-    policy.csv: ''
+    policy.csv: |
+      g, platform-admins, role:admin
     # Policy rules are in the form:
     #  p, subject, resource, action, object, effect
     # Role definitions and bindings are in the form:
@@ -591,7 +607,7 @@ configs:
     ## Ref: https://argo-cd.readthedocs.io/en/stable/operator-manual/user-management/#sensitive-data-and-sso-client-secrets
     ## Note that all values must be non-empty.
     extra:
-      {}
+      oidc.keycloak.clientSecret: __OIDC_ARGOCD_CLIENT_SECRET__
       # LDAP_PASSWORD: "mypassword"
 
     # -- Bcrypt hashed admin password

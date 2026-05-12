@@ -10,6 +10,12 @@ cd "$SCRIPT_DIR"
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.15.3}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.3.0}"
 ENVOY_GATEWAY_VERSION="${ENVOY_GATEWAY_VERSION:-v1.5.0}"
+KEYCLOAK_REALM="${KEYCLOAK_REALM:-kind-lab}"
+KEYCLOAK_ADMIN_USER="${KEYCLOAK_ADMIN_USER:-admin}"
+KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-admin}"
+KEYCLOAK_DB_PASSWORD="${KEYCLOAK_DB_PASSWORD:-keycloak-local-dev-password}"
+OIDC_GRAFANA_CLIENT_SECRET="${OIDC_GRAFANA_CLIENT_SECRET:-grafana-local-dev-secret}"
+OIDC_ARGOCD_CLIENT_SECRET="${OIDC_ARGOCD_CLIENT_SECRET:-argocd-local-dev-secret}"
 # Optional: IP-Range für MetalLB überschreiben (z.B. METALLB_ADDRESS_RANGE="172.18.255.200-172.18.255.250").
 METALLB_ADDRESS_RANGE="${METALLB_ADDRESS_RANGE:-}"
 METALLB_IP_POOL_NAME="loadbalancerpool"
@@ -100,6 +106,7 @@ echo "ℹ️  Konfiguration:"
 echo "   KIND-Cluster: ${CLUSTER_NAME}"
 echo "   KIND-Config : ${KIND_CONFIG_PATH}"
 echo "   Gateway-Domain: *.${INGRESS_BASE_DOMAIN}"
+echo "   Keycloak-Realm: ${KEYCLOAK_REALM}"
 if [[ -n "$METALLB_ADDRESS_RANGE" ]]; then
   echo "   MetalLB-Range (fix): ${METALLB_ADDRESS_RANGE}"
 else
@@ -129,14 +136,24 @@ cleanup_temp_files() {
 }
 trap cleanup_temp_files EXIT
 
+escape_sed() {
+  printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
+}
+
 render_template() {
   local template_file=$1
   local tmp
   tmp="$(mktemp)"
   sed \
-    -e "s/__INGRESS_BASE_DOMAIN__/${INGRESS_BASE_DOMAIN//\//\\/}/g" \
-    -e "s/__INGRESS_BASE_DOMAIN_REGEX__/${INGRESS_BASE_DOMAIN//./\\.}/g" \
-    -e "s/__GATEWAY_LB_IP__/${GATEWAY_LB_IP:-}/g" \
+    -e "s/__INGRESS_BASE_DOMAIN__/$(escape_sed "$INGRESS_BASE_DOMAIN")/g" \
+    -e "s/__INGRESS_BASE_DOMAIN_REGEX__/$(escape_sed "${INGRESS_BASE_DOMAIN//./\\.}")/g" \
+    -e "s/__GATEWAY_LB_IP__/$(escape_sed "${GATEWAY_LB_IP:-}")/g" \
+    -e "s/__KEYCLOAK_REALM__/$(escape_sed "$KEYCLOAK_REALM")/g" \
+    -e "s/__KEYCLOAK_ADMIN_USER__/$(escape_sed "$KEYCLOAK_ADMIN_USER")/g" \
+    -e "s/__KEYCLOAK_ADMIN_PASSWORD__/$(escape_sed "$KEYCLOAK_ADMIN_PASSWORD")/g" \
+    -e "s/__KEYCLOAK_DB_PASSWORD__/$(escape_sed "$KEYCLOAK_DB_PASSWORD")/g" \
+    -e "s/__OIDC_GRAFANA_CLIENT_SECRET__/$(escape_sed "$OIDC_GRAFANA_CLIENT_SECRET")/g" \
+    -e "s/__OIDC_ARGOCD_CLIENT_SECRET__/$(escape_sed "$OIDC_ARGOCD_CLIENT_SECRET")/g" \
     "$template_file" > "$tmp"
   TEMP_FILES+=("$tmp")
   echo "$tmp"
@@ -227,8 +244,10 @@ print_dns_quickstart() {
   echo "Domain:       *.${INGRESS_BASE_DOMAIN}"
   echo "DNS-IP:       ${dns_ip}"
   echo "Gateway-IP:   ${gateway_ip}"
+  echo "Keycloak URL: https://keycloak.${INGRESS_BASE_DOMAIN}"
   echo "Grafana URL:  https://grafana.${INGRESS_BASE_DOMAIN}"
   echo "Argo CD URL:  https://argocd.${INGRESS_BASE_DOMAIN}"
+  echo "SSO user:     ${KEYCLOAK_ADMIN_USER} / ${KEYCLOAK_ADMIN_PASSWORD}"
   echo ""
 
   case "$(uname -s)" in
@@ -267,7 +286,7 @@ print_dns_quickstart() {
 
   echo ""
   echo "Fallback /etc/hosts:"
-  echo "  echo '${gateway_ip} argocd.${INGRESS_BASE_DOMAIN} grafana.${INGRESS_BASE_DOMAIN} prometheus.${INGRESS_BASE_DOMAIN} alertmanager.${INGRESS_BASE_DOMAIN}' | sudo tee -a /etc/hosts"
+  echo "  echo '${gateway_ip} keycloak.${INGRESS_BASE_DOMAIN} argocd.${INGRESS_BASE_DOMAIN} grafana.${INGRESS_BASE_DOMAIN} prometheus.${INGRESS_BASE_DOMAIN} alertmanager.${INGRESS_BASE_DOMAIN}' | sudo tee -a /etc/hosts"
   echo ""
 }
 
@@ -577,9 +596,23 @@ apply_template "$SCRIPT_DIR/gateway/gatewayclass.yaml"
 apply_template "$SCRIPT_DIR/gateway/certificate.yaml"
 kubectl wait --for=condition=Ready certificate/local-gateway-wildcard -n envoy-gateway-system --timeout=180s
 apply_template "$SCRIPT_DIR/gateway/gateway.yaml"
+wait_gateway_address "envoy-gateway-system" "local-gateway" 180
 
 echo "==========================================="
-echo "🚀 5. ArgoCD installieren"
+echo "🚀 5. Keycloak installieren und Realm bootstrappen"
+echo "==========================================="
+apply_template "$SCRIPT_DIR/keycloak/keycloak.yaml"
+kubectl -n sso delete job keycloak-bootstrap-realm --ignore-not-found
+check_pods_ready "sso" 300 60 5
+apply_template "$SCRIPT_DIR/keycloak/bootstrap-realm-job.yaml"
+kubectl -n sso wait --for=condition=complete job/keycloak-bootstrap-realm --timeout=300s || {
+  kubectl -n sso logs job/keycloak-bootstrap-realm || true
+  exit 1
+}
+kubectl -n sso logs job/keycloak-bootstrap-realm || true
+
+echo "==========================================="
+echo "🚀 6. ArgoCD installieren"
 echo "==========================================="
 echo "Helm install Argocd with custom values"
 ARGOCD_VALUES_FILE="$(render_template "$SCRIPT_DIR/argo-cd/values.yaml")"
@@ -609,6 +642,7 @@ type: Opaque
 stringData:
   admin.password: "$ADMIN_HASH"
   admin.passwordMtime: "$TIMESTAMP"
+  oidc.keycloak.clientSecret: "$OIDC_ARGOCD_CLIENT_SECRET"
 EOF
 
 echo "neustarten des ArgoCD Pods - damit Passwort erneuert wird"
@@ -621,8 +655,12 @@ echo "https://argocd.${INGRESS_BASE_DOMAIN}"
 echo "checkout Workloads at: https://gitlab.com/patrickdaumann/kind-lab-argocd"
 
 echo "==========================================="
-echo "🚀 6. Monitoring Bootstrap"
+echo "🚀 7. Monitoring Bootstrap"
 echo "==========================================="
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n monitoring create secret generic grafana-oidc-secret \
+  --from-literal=client-secret="$OIDC_GRAFANA_CLIENT_SECRET" \
+  --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --create-namespace \
@@ -632,7 +670,7 @@ check_pods_ready "monitoring" 120 24 5
 apply_template_dir "$SCRIPT_DIR/gateway/routes/monitoring"
 
 echo "==========================================="
-echo "🚀 7. Setup Local DNS for local external Name Resolution"
+echo "🚀 8. Setup Local DNS for local external Name Resolution"
 echo "==========================================="
 wait_gateway_address "envoy-gateway-system" "local-gateway" 180
 if helm status exdns >/dev/null 2>&1; then

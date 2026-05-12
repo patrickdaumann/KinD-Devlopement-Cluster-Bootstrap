@@ -1,0 +1,145 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-bootstrap-realm
+  namespace: sso
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: quay.io/keycloak/keycloak:25.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KEYCLOAK_ADMIN
+              value: __KEYCLOAK_ADMIN_USER__
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: __KEYCLOAK_ADMIN_PASSWORD__
+            - name: KEYCLOAK_REALM
+              value: __KEYCLOAK_REALM__
+            - name: INGRESS_BASE_DOMAIN
+              value: __INGRESS_BASE_DOMAIN__
+            - name: OIDC_GRAFANA_CLIENT_SECRET
+              value: __OIDC_GRAFANA_CLIENT_SECRET__
+            - name: OIDC_ARGOCD_CLIENT_SECRET
+              value: __OIDC_ARGOCD_CLIENT_SECRET__
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              KCADM=/opt/keycloak/bin/kcadm.sh
+              SERVER=http://keycloak.sso.svc.cluster.local
+
+              echo "Waiting for Keycloak admin API..."
+              until "$KCADM" config credentials \
+                --server "$SERVER" \
+                --realm master \
+                --user "$KEYCLOAK_ADMIN" \
+                --password "$KEYCLOAK_ADMIN_PASSWORD"; do
+                sleep 5
+              done
+
+              if ! "$KCADM" get "realms/${KEYCLOAK_REALM}" >/dev/null 2>&1; then
+                "$KCADM" create realms \
+                  -s realm="$KEYCLOAK_REALM" \
+                  -s enabled=true \
+                  -s registrationAllowed=false \
+                  -s resetPasswordAllowed=false \
+                  -s loginWithEmailAllowed=true
+              fi
+
+              if ! "$KCADM" get groups -r "$KEYCLOAK_REALM" | grep -q '"name" : "platform-admins"'; then
+                "$KCADM" create groups -r "$KEYCLOAK_REALM" -s name=platform-admins
+              fi
+
+              create_or_update_client() {
+                local client_id=$1
+                local secret=$2
+                local redirect_uri=$3
+                local web_origin=$4
+                local client_uuid
+
+                client_uuid=$("$KCADM" get clients -r "$KEYCLOAK_REALM" -q clientId="$client_id" --fields id --format csv --noquotes 2>/dev/null | tail -n1 || true)
+
+                if [[ -z "$client_uuid" ]]; then
+                  "$KCADM" create clients -r "$KEYCLOAK_REALM" \
+                    -s clientId="$client_id" \
+                    -s enabled=true \
+                    -s protocol=openid-connect \
+                    -s publicClient=false \
+                    -s secret="$secret" \
+                    -s standardFlowEnabled=true \
+                    -s directAccessGrantsEnabled=false \
+                    -s serviceAccountsEnabled=false \
+                    -s "redirectUris=[\"$redirect_uri\"]" \
+                    -s "webOrigins=[\"$web_origin\"]"
+                  client_uuid=$("$KCADM" get clients -r "$KEYCLOAK_REALM" -q clientId="$client_id" --fields id --format csv --noquotes | tail -n1)
+                else
+                  "$KCADM" update "clients/${client_uuid}" -r "$KEYCLOAK_REALM" \
+                    -s enabled=true \
+                    -s publicClient=false \
+                    -s secret="$secret" \
+                    -s standardFlowEnabled=true \
+                    -s directAccessGrantsEnabled=false \
+                    -s "redirectUris=[\"$redirect_uri\"]" \
+                    -s "webOrigins=[\"$web_origin\"]"
+                fi
+
+                if ! "$KCADM" get "clients/${client_uuid}/protocol-mappers/models" -r "$KEYCLOAK_REALM" | grep -q '"name" : "groups"'; then
+                  "$KCADM" create "clients/${client_uuid}/protocol-mappers/models" -r "$KEYCLOAK_REALM" \
+                    -s name=groups \
+                    -s protocol=openid-connect \
+                    -s protocolMapper=oidc-group-membership-mapper \
+                    -s 'config."full.path"=false' \
+                    -s 'config."id.token.claim"=true' \
+                    -s 'config."access.token.claim"=true' \
+                    -s 'config."userinfo.token.claim"=true' \
+                    -s 'config."claim.name"=groups'
+                fi
+              }
+
+              create_or_update_client \
+                grafana \
+                "$OIDC_GRAFANA_CLIENT_SECRET" \
+                "https://grafana.${INGRESS_BASE_DOMAIN}/login/generic_oauth" \
+                "https://grafana.${INGRESS_BASE_DOMAIN}"
+
+              create_or_update_client \
+                argocd \
+                "$OIDC_ARGOCD_CLIENT_SECRET" \
+                "https://argocd.${INGRESS_BASE_DOMAIN}/auth/callback" \
+                "https://argocd.${INGRESS_BASE_DOMAIN}"
+
+              user_id=$("$KCADM" get users -r "$KEYCLOAK_REALM" -q username=admin --fields id --format csv --noquotes 2>/dev/null | tail -n1 || true)
+              if [[ -z "$user_id" ]]; then
+                "$KCADM" create users -r "$KEYCLOAK_REALM" \
+                  -s username=admin \
+                  -s enabled=true \
+                  -s email=admin@kind.local \
+                  -s emailVerified=true \
+                  -s firstName=Local \
+                  -s lastName=Admin
+                user_id=$("$KCADM" get users -r "$KEYCLOAK_REALM" -q username=admin --fields id --format csv --noquotes | tail -n1)
+              else
+                "$KCADM" update "users/${user_id}" -r "$KEYCLOAK_REALM" \
+                  -s enabled=true \
+                  -s email=admin@kind.local \
+                  -s emailVerified=true \
+                  -s firstName=Local \
+                  -s lastName=Admin
+              fi
+              "$KCADM" set-password -r "$KEYCLOAK_REALM" --userid "$user_id" --new-password admin
+
+              group_id=$("$KCADM" get groups -r "$KEYCLOAK_REALM" -q search=platform-admins --fields id --format csv --noquotes | tail -n1)
+              if [[ -n "$group_id" ]]; then
+                "$KCADM" update "users/${user_id}/groups/${group_id}" -r "$KEYCLOAK_REALM" \
+                  -s realm="$KEYCLOAK_REALM" \
+                  -s userId="$user_id" \
+                  -s groupId="$group_id" \
+                  -n || true
+              fi
+
+              echo "Keycloak realm '${KEYCLOAK_REALM}' bootstrapped."

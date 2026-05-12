@@ -13,9 +13,9 @@ type: Opaque
 stringData:
   POSTGRES_DB: keycloak
   POSTGRES_USER: keycloak
-  POSTGRES_PASSWORD: supersecret
+  POSTGRES_PASSWORD: __KEYCLOAK_DB_PASSWORD__
   KC_DB_USERNAME: keycloak
-  KC_DB_PASSWORD: supersecret
+  KC_DB_PASSWORD: __KEYCLOAK_DB_PASSWORD__
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -64,6 +64,8 @@ spec:
                 secretKeyRef:
                   name: keycloak-db-credentials
                   key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
           ports:
             - containerPort: 5432
               name: postgres
@@ -111,15 +113,11 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - start-dev
-
           env:
-            # Admin-User (Test)
             - name: KEYCLOAK_ADMIN
-              value: admin
+              value: __KEYCLOAK_ADMIN_USER__
             - name: KEYCLOAK_ADMIN_PASSWORD
-              value: admin
-
-            # DB-Konfiguration
+              value: __KEYCLOAK_ADMIN_PASSWORD__
             - name: KC_DB
               value: postgres
             - name: KC_DB_URL_HOST
@@ -141,32 +139,23 @@ spec:
                 secretKeyRef:
                   name: keycloak-db-credentials
                   key: KC_DB_PASSWORD
-
-            # Externer Hostname
             - name: KC_HOSTNAME
-              value: keycloak.kind.lab
-
-            # WICHTIG: Keycloak korrekt hinter TLS-terminierendem Proxy betreiben
-            - name: KC_PROXY
-              value: edge
-            # Hostname-Strictness lockern, damit X-Forwarded-* vom Gateway akzeptiert werden
+              value: https://keycloak.__INGRESS_BASE_DOMAIN__
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
             - name: KC_HOSTNAME_STRICT
               value: "false"
-            - name: KC_HOSTNAME_STRICT_HTTPS
-              value: "false"
-
-            # Health Checks aktivieren
             - name: KC_HEALTH_ENABLED
               value: "true"
             - name: KC_HTTP_MANAGEMENT_HEALTH_ENABLED
               value: "true"
-
           ports:
             - containerPort: 8080
               name: http
             - containerPort: 9000
               name: http-management
-
           readinessProbe:
             httpGet:
               path: /health/ready
@@ -175,7 +164,6 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 12
-
           livenessProbe:
             httpGet:
               path: /health/live
@@ -184,14 +172,13 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 10
-
           resources:
             requests:
               cpu: "250m"
-              memory: "512Mi"
+              memory: "768Mi"
             limits:
               cpu: "1"
-              memory: "1Gi"
+              memory: "2Gi"
 ---
 apiVersion: v1
 kind: Service
@@ -219,7 +206,7 @@ spec:
       namespace: envoy-gateway-system
       sectionName: https
   hostnames:
-    - keycloak.kind.lab
+    - keycloak.__INGRESS_BASE_DOMAIN__
   rules:
     - matches:
         - path:
@@ -228,16 +215,3 @@ spec:
       backendRefs:
         - name: keycloak
           port: 80
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: keycloak-cert
-  namespace: sso
-spec:
-  secretName: keycloak-tls
-  dnsNames:
-    - keycloak.kind.lab
-  issuerRef:
-    name: local-ca-issuer
-    kind: ClusterIssuer
