@@ -130,8 +130,10 @@ ensure_ca_material() {
 
 TEMP_FILES=()
 cleanup_temp_files() {
-  for file in "${TEMP_FILES[@]}"; do
-    [[ -f "$file" ]] && rm -f "$file"
+  # Bash 3.2 on macOS treats an empty array expansion as unbound when
+  # 'set -u' is enabled, so provide an empty fallback.
+  for file in "${TEMP_FILES[@]:-}"; do
+    [[ -n "$file" && -f "$file" ]] && rm -f "$file"
   done
 }
 trap cleanup_temp_files EXIT
@@ -527,7 +529,9 @@ echo "==========================================="
 helm repo add metallb https://metallb.github.io/metallb --force-update
 helm repo add argo https://argoproj.github.io/argo-helm --force-update
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
-helm repo update
+# Update only the repositories used by this script. A stale/broken local Helm
+# repo entry (e.g. kubernetes-dashboard) should not abort the bootstrap.
+helm repo update metallb argo prometheus-community
 
 echo "==========================================="
 echo "🔧 1. Create KIND Cluster..."
