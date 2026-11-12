@@ -25,3 +25,11 @@ Thumbs.db
 kubeconfig
 *.kubeconfig
 bootstrap/CA/
+
+# Install-Logs von setup-cluster.sh (können Zugangsdaten enthalten)
+install-logs/
+*.log
+
+# Helm-Artefakte (helm package / helm dependency update)
+*.tgz
+charts/

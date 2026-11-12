@@ -915,7 +915,7 @@ alertmanager:
     image:
       registry: quay.io
       repository: prometheus/alertmanager
-      tag: v0.28.1
+      tag: v0.35.0
       sha: ""
 
     ## If true then the user will be responsible to provide a secret with alertmanager configuration
@@ -2881,9 +2881,9 @@ prometheusOperator:
     patch:
       enabled: true
       image:
-        registry: registry.k8s.io
-        repository: ingress-nginx/kube-webhook-certgen
-        tag: v1.5.2  # latest tag: https://github.com/kubernetes/ingress-nginx/blob/main/images/kube-webhook-certgen/TAG
+        registry: ghcr.io
+        repository: jkroepke/kube-webhook-certgen
+        tag: 1.11.1
         sha: ""
         pullPolicy: IfNotPresent
       resources: {}
@@ -3313,7 +3313,7 @@ prometheusOperator:
   thanosImage:
     registry: quay.io
     repository: thanos/thanos
-    tag: v0.37.2
+    tag: v0.42.5
     sha: ""
 
   ## Set a Label Selector to filter watched prometheus and prometheusAgent
@@ -3963,7 +3963,7 @@ prometheus:
     image:
       registry: quay.io
       repository: prometheus/prometheus
-      tag: v3.2.1
+      tag: v3.16.0-distroless
       sha: ""
 
     ## Tolerations for use with node taints
@@ -5044,7 +5044,7 @@ thanosRuler:
     image:
       registry: quay.io
       repository: thanos/thanos
-      tag: v0.37.2
+      tag: v0.42.5
       sha: ""
 
     ## Namespaces to be selected for PrometheusRules discovery.

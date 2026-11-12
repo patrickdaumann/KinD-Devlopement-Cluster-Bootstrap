@@ -7,7 +7,8 @@ Lokales Bootstrap-Skript für eine voll ausgestattete KIND-Spielwiese inklusive 
 1. Repository klonen und in das Projektverzeichnis wechseln.
 2. `bootstrap.yaml` prüfen/anpassen (Clustername, KIND-Konfig, gewünschte Domain).
 3. Optional `METALLB_ADDRESS_RANGE` setzen, falls der automatische Vorschlag nicht passt.
-4. `./bootstrap/setup-cluster.sh` ausführen – CA wird generiert, Helm-Releases werden eingerichtet.
+4. `./bootstrap/setup-cluster.sh` ausführen – CA wird generiert, Helm-Releases werden eingerichtet.  
+   Cluster komplett neu aufsetzen: `./bootstrap/setup-cluster.sh --rebootstrap` (mit Sicherheitsabfrage). Alle Optionen: `--help`.
 5. CA-Zertifikat (`bootstrap/CA/ca.crt`) vertrauen und Gateway-Domains `<prefix>.<domain>.<tld>` lokal auflösen.
 
 ---
@@ -25,6 +26,7 @@ Lokales Bootstrap-Skript für eine voll ausgestattete KIND-Spielwiese inklusive 
 Repository-Layout:
 ```
 bootstrap.yaml              # Konfigurationsdatei für Cluster & Domains
+install-logs/               # Logdatei pro Skriptlauf (gitignored)
 bootstrap/
  ├─ setup-cluster.sh        # Hauptskript
  ├─ CA/                     # wird beim Lauf mit CA-Material befüllt (gitignored)
@@ -44,7 +46,7 @@ bootstrap/
 | Komponente | Hinweis |
 |------------|---------|
 | **KIND**   | Kubernetes in Docker. Auf macOS empfiehlt sich Orbstack statt Docker Desktop (MetalLB benötigt funktionierendes L2-Networking). |
-| **Docker** | Basis für KIND & MetalLB. |
+| **Docker** | Basis für KIND & MetalLB. Gemeint ist eine Docker-Engine inkl. `docker`-CLI – z. B. von OrbStack (empfohlen auf macOS) oder Docker Desktop. Das Skript prüft beim Start, ob `docker` vorhanden ist und die Engine läuft. |
 | **Helm**   | Version 3 oder neuer. |
 | **kubectl** | Für sämtliche `kubectl`-Befehle im Skript. |
 | **openssl** | Generiert das lokale CA-Zertifikat. |
@@ -73,7 +75,9 @@ Alle Werte lassen sich zur Laufzeit über Umgebungsvariablen überschreiben (`CL
 ## Bootstrap-Ablauf
 
 1. **Checks & Konfiguration laden**  
-   `setup-cluster.sh` prüft benötigte Tools, lädt `bootstrap.yaml` und setzt interne Variablen (Clustername, Domain, KIND-Config).
+   `setup-cluster.sh` startet das Install-Log, lädt `bootstrap.yaml` und setzt interne Variablen (Clustername, Domain, KIND-Config).  
+   Danach – noch bevor etwas abgefragt oder verändert wird – prüft es die benötigten Tools (`docker`, `kind`, `kubectl`, `helm`, `openssl`, `python3`) und ob die Docker-Engine (z. B. OrbStack) läuft.  
+   Mit `--rebootstrap` folgt eine Sicherheitsabfrage (`Are you sure you want to: delete the KIND cluster ...`).
 
 2. **MetalLB-Range ermitteln**  
    - Manuelle Vorgabe via `METALLB_ADDRESS_RANGE` oder `metallbAddressRange` in der YAML.  
@@ -81,7 +85,7 @@ Alle Werte lassen sich zur Laufzeit über Umgebungsvariablen überschreiben (`CL
    - Fallback auf statische YAML bei IPv6 oder fehlgeschlagener Erkennung.
 
 3. **KIND-Cluster erstellen**  
-   Verwendet die in `bootstrap.yaml` hinterlegte Konfiguration.
+   Verwendet die in `bootstrap.yaml` hinterlegte Konfiguration. Bei `--rebootstrap` wird ein bestehender Cluster gleichen Namens unmittelbar vorher gelöscht (die CA in `bootstrap/CA` bleibt erhalten). Ohne die Option wird ein vorhandener Cluster wiederverwendet.
 
 4. **MetalLB deployen & konfigurieren**  
    Helm-Release plus IPAddressPool/L2Advertisement (dynamisch oder statisch).
@@ -102,7 +106,7 @@ Alle Werte lassen sich zur Laufzeit über Umgebungsvariablen überschreiben (`CL
    Lokaler Admin bleibt als Fallback aktiv.
 
 9. **Monitoring (kube-prometheus-stack)**  
-   Helm-Release ohne Ingress-Ressourcen; Grafana nutzt Keycloak-OIDC, externe Zugriffe erfolgen über gerenderte HTTPRoutes (`grafana.<domain>.<tld>`, `prometheus.<domain>.<tld>` …).
+   Helm-Release in fest gepinnter Chart-Version (`KUBE_PROMETHEUS_STACK_VERSION`, Standard `93.2.2`) ohne Ingress-Ressourcen; Grafana nutzt Keycloak-OIDC, externe Zugriffe erfolgen über gerenderte HTTPRoutes (`grafana.<domain>.<tld>`, `prometheus.<domain>.<tld>` …).
 
 10. **Lokales DNS**  
    Installiert einen kleinen CoreDNS-Resolver, der `*.<domain>.<tld>` auf die Gateway-LoadBalancer-IP auflöst, und gibt den nötigen Resolver-Eintrag aus.
@@ -147,6 +151,8 @@ Hinweise:
 | **Argo CD UI** | `https://argocd.<domain>.<tld>` – Login via Keycloak; lokaler Admin bleibt als Fallback aktiv. |
 | **Grafana** | `https://grafana.<domain>.<tld>` – Login via Keycloak; Grafana nutzt die Keycloak-E-Mail als Login, um Konflikte mit dem lokalen `admin` zu vermeiden. |
 | **Cluster entfernen** | `kind delete cluster --name <clusterName>`. |
+| **Install-Logs** | Jeder Lauf schreibt nach `install-logs/setup-<YYYYMMDD-HHMMSS>.log` (Terminal-Ausgabe bleibt unverändert, Datei nur für den eigenen User lesbar, von Git ignoriert). Abschalten mit `INSTALL_LOGGING=false`, anderer Ordner via `INSTALL_LOG_DIR`. |
+| **Cluster neu aufsetzen** | `./bootstrap/setup-cluster.sh --rebootstrap` – fragt nach Bestätigung, löscht den bestehenden Cluster und bootstrappt ihn neu (CA in `bootstrap/CA` bleibt erhalten). |
 
 ---
 
@@ -252,6 +258,18 @@ open https://grafana.kind.lab
   - `docker network inspect kind` zur Kontrolle.  
   - MetalLB-Pods neu starten: `kubectl delete pod -n metallb-system -l app=metallb`.
 
+- **Wo finde ich die Ausgabe eines früheren Laufs?**  
+  - In `install-logs/setup-<YYYYMMDD-HHMMSS>.log`. Kopfzeile enthält Startzeit, Optionen und Git-Commit, Fußzeile den Exit-Code.  
+  - Schneller Fehler-Check: `grep -nE "❌|Error|error:" install-logs/<datei>.log`.
+
+- **kube-prometheus-stack: `unknown flag: --secret-type` im Job `kube-prometheus-stack-admission-create`**  
+  - Ursache: Chart-Version und das in `bootstrap/kube-prometheus-stack/values.yaml` gepinnte `kube-webhook-certgen`-Image passen nicht zusammen (neuere Charts benötigen `ghcr.io/jkroepke/kube-webhook-certgen` ≥ 1.11.0).  
+  - Die Values sind auf die Chart-Version `KUBE_PROMETHEUS_STACK_VERSION` abgestimmt. Wer die Version anhebt, muss die Image-Tags in den Values mitziehen (`helm show values prometheus-community/kube-prometheus-stack --version <v>`).  
+  - Fehlgeschlagenen Job vor dem erneuten Lauf löschen: `kubectl -n monitoring delete job kube-prometheus-stack-admission-create`.
+
+- **Skript bricht sofort mit „Docker-Engine nicht erreichbar“ ab**  
+  - OrbStack bzw. Docker starten; aktiven Context prüfen mit `docker context ls` (bei OrbStack: `docker context use orbstack`).
+
 - **Pods hängen in `CrashLoopBackOff` / `Pending`**  
   - `kubectl get events -A` prüfen.  
   - Ressourcenlimits deines lokalen Docker/Orbstack anpassen.
@@ -293,7 +311,10 @@ open https://grafana.kind.lab
 | `bootstrap/gateway/routes/**/*.yaml` | HTTPRoutes für Argo CD und Monitoring. |
 | `bootstrap/keycloak/*.yaml` | Keycloak, Postgres und Realm/OIDC-Bootstrap. |
 | `KEYCLOAK_REALM` | Realm-Name, Standard `kind-lab`. |
-| `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` | Lokaler Keycloak-Admin und SSO-Testuser, Standard `admin` / `admin`. |
+| `KEYCLOAK_ADMIN_USER` / `KEYCLOAK_ADMIN_PASSWORD` | Lokaler Keycloak-Admin (Realm `master`), Standard `admin` / `admin`. Der SSO-Testuser im Realm `kind-lab` ist derzeit fest `admin` / `admin` (`bootstrap/keycloak/bootstrap-realm-job.yaml`). |
+| `KUBE_PROMETHEUS_STACK_VERSION` | Gepinnte Chart-Version für kube-prometheus-stack, Standard `93.2.2` (muss zu den Image-Tags in den Values passen). |
+| `INSTALL_LOGGING` / `INSTALL_LOG_DIR` | Install-Logs an/aus (Standard `true`) und Zielordner (Standard `install-logs/`). |
+| `CERT_MANAGER_VERSION` / `GATEWAY_API_VERSION` / `ENVOY_GATEWAY_VERSION` | Weitere Versions-Pins der Bootstrap-Komponenten. |
 | `KEYCLOAK_DB_PASSWORD` | Lokales Postgres-Passwort für Keycloak, Standard `keycloak-local-dev-password`. |
 | `OIDC_GRAFANA_CLIENT_SECRET` / `OIDC_ARGOCD_CLIENT_SECRET` | Lokale OIDC-Client-Secrets. |
 | `bootstrap/argo-cd/values.yaml` | Helm-Values ohne Ingress-Erzeugung, mit Keycloak-OIDC. |
@@ -306,7 +327,10 @@ open https://grafana.kind.lab
   Ja. `helm upgrade --install` und `kubectl apply` machen den Ablauf idempotent. Secrets (z. B. Argo-CD-Passwort) werden dabei erneut gesetzt.
 
 - **Was passiert bei Abbruch?**  
-  Starte das Skript einfach neu. Bereits eingerichtete Releases/Ressourcen werden aktualisiert.
+  Starte das Skript einfach neu. Bereits eingerichtete Releases/Ressourcen werden aktualisiert. Die Ursache steht im jeweiligen Log unter `install-logs/`. Für einen sauberen Neustart: `--rebootstrap`.
+
+- **Bleiben gerenderte Manifeste mit Secrets liegen?**  
+  Nein. Templates werden in ein temporäres, nur für den eigenen User lesbares Verzeichnis gerendert, das beim Beenden des Skripts (auch bei Fehlern) gelöscht wird.
 
 - **Eignung für Produktion?**  
   Das Setup ist für lokale Entwicklungs- und Demo-Umgebungen gedacht. Für Produktion sind zusätzliche Maßnahmen bzgl. Verfügbarkeit, Persistenz und Security erforderlich.

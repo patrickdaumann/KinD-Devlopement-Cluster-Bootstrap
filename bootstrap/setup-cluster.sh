@@ -6,10 +6,64 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [Optionen]
+
+Optionen:
+  -r, --rebootstrap   Bestehenden KIND-Cluster löschen und komplett neu bootstrappen
+                      (mit Sicherheitsabfrage; lokale CA in ./CA bleibt erhalten)
+  -h, --help          Diese Hilfe anzeigen
+EOF
+}
+
+SCRIPT_ARGS="$*"
+REBOOTSTRAP=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -r|--rebootstrap) REBOOTSTRAP=true ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "❌ Unbekannte Option: $1"; usage; exit 1 ;;
+  esac
+  shift
+done
+
+# Logging: gesamte Ausgabe (stdout + stderr) zusätzlich in eine Logdatei pro Lauf schreiben.
+# Abschaltbar mit INSTALL_LOGGING=false, Zielordner änderbar über INSTALL_LOG_DIR.
+INSTALL_LOGGING="${INSTALL_LOGGING:-true}"
+INSTALL_LOG_DIR="${INSTALL_LOG_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)/install-logs}"
+INSTALL_LOG_FILE=""
+if [[ "$INSTALL_LOGGING" == true ]]; then
+  mkdir -p "$INSTALL_LOG_DIR"
+  INSTALL_LOG_FILE="$INSTALL_LOG_DIR/setup-$(date +%Y%m%d-%H%M%S).log"
+  [[ -e "$INSTALL_LOG_FILE" ]] && INSTALL_LOG_FILE="${INSTALL_LOG_FILE%.log}-$$.log"
+  # Logs können Zugangsdaten enthalten → nur für den eigenen User lesbar.
+  (umask 077 && : > "$INSTALL_LOG_FILE")
+  exec > >(tee -a "$INSTALL_LOG_FILE") 2>&1
+  echo "📝 Install-Log: $INSTALL_LOG_FILE"
+  echo "   Start: $(date '+%Y-%m-%d %H:%M:%S %z') | Args: ${SCRIPT_ARGS:-<keine>} | Git: $(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo n/a)$(git -C "$SCRIPT_DIR" diff --quiet 2>/dev/null || echo ' (dirty)')"
+fi
+
+on_exit() {
+  local rc=$?
+  # Im Exit-Trap darf nichts mehr wegen 'set -e' abbrechen, sonst fehlt die Fußzeile.
+  set +e
+  # cleanup_temp_files wird weiter unten definiert; bei frühem Abbruch evtl. noch nicht vorhanden.
+  if declare -F cleanup_temp_files >/dev/null; then
+    cleanup_temp_files
+  fi
+  if [[ -n "$INSTALL_LOG_FILE" ]]; then
+    echo "📝 Ende: $(date '+%Y-%m-%d %H:%M:%S %z') | Exit-Code: ${rc} | Log: ${INSTALL_LOG_FILE}"
+  fi
+}
+trap on_exit EXIT
+
 # Version-Pin für reproduzierbare Cluster-Bootstraps.
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.15.3}"
 GATEWAY_API_VERSION="${GATEWAY_API_VERSION:-v1.3.0}"
 ENVOY_GATEWAY_VERSION="${ENVOY_GATEWAY_VERSION:-v1.5.0}"
+# Chart-Version passend zu ./kube-prometheus-stack/values.yaml (Image-Tags dort sind auf diese Version abgestimmt).
+KUBE_PROMETHEUS_STACK_VERSION="${KUBE_PROMETHEUS_STACK_VERSION:-93.2.2}"
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-kind-lab}"
 KEYCLOAK_ADMIN_USER="${KEYCLOAK_ADMIN_USER:-admin}"
 KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-admin}"
@@ -113,6 +167,46 @@ else
   echo "   MetalLB-Range: automatisch bestimmen"
 fi
 
+require_commands() {
+  local missing=()
+  for cmd in "$@"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing+=("$cmd")
+    fi
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    echo "❌ Fehlende benötigte Tools: ${missing[*]}"
+    echo "👉 Bitte installiere sie und starte das Skript erneut."
+    echo "   (Hinweis: 'docker' wird z.B. von OrbStack oder Docker Desktop bereitgestellt.)"
+    exit 1
+  fi
+}
+
+require_container_engine() {
+  if ! docker info >/dev/null 2>&1; then
+    echo "❌ Docker-Engine nicht erreichbar (aktiver Context: $(docker context show 2>/dev/null || echo unbekannt))."
+    echo "👉 Bitte OrbStack bzw. Docker starten und das Skript erneut ausführen."
+    exit 1
+  fi
+}
+
+# Abhängigkeiten prüfen, bevor irgendetwas abgefragt oder verändert wird.
+REQUIRED_COMMANDS=(docker kind kubectl helm openssl "$PYTHON_CMD")
+require_commands "${REQUIRED_COMMANDS[@]}"
+require_container_engine
+echo "✅ Abhängigkeiten vorhanden, Docker-Engine erreichbar ($(docker info --format '{{.OperatingSystem}}' 2>/dev/null))."
+
+if [[ "$REBOOTSTRAP" == true ]]; then
+  echo
+  echo "⚠️  Rebootstrap angefordert."
+  read -r -p "Are you sure you want to: delete the KIND cluster '${CLUSTER_NAME}' (all data in it will be lost) and bootstrap it from scratch? [y/N]: " rebootstrap_confirm || rebootstrap_confirm=""
+  case "$rebootstrap_confirm" in
+    y|Y|yes|YES|j|J|ja|JA) echo "➡️  Cluster '${CLUSTER_NAME}' wird vor dem Bootstrap gelöscht." ;;
+    *) echo "🚫 Abbruch auf Wunsch des Nutzers. Es wurde nichts geändert."; exit 0 ;;
+  esac
+fi
+
 ensure_ca_material() {
   mkdir -p "$CA_DIR"
   if [[ -f "$CA_CERT_PATH" && -f "$CA_KEY_PATH" ]]; then
@@ -128,15 +222,16 @@ ensure_ca_material() {
     -subj "/CN=${CA_COMMON_NAME}/O=${CA_ORGANIZATION}"
 }
 
-TEMP_FILES=()
+# Gerenderte Templates (enthalten Passwörter/Secrets) landen in einem eigenen,
+# nur für den User lesbaren Verzeichnis, das beim Beenden komplett gelöscht wird.
+# Hinweis: render_template läuft in einer Subshell ($(...)), daher kein Array-Tracking.
+RENDER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kind-bootstrap.XXXXXX")"
 cleanup_temp_files() {
-  # Bash 3.2 on macOS treats an empty array expansion as unbound when
-  # 'set -u' is enabled, so provide an empty fallback.
-  for file in "${TEMP_FILES[@]:-}"; do
-    [[ -n "$file" && -f "$file" ]] && rm -f "$file"
-  done
+  if [[ -n "${RENDER_DIR:-}" && -d "$RENDER_DIR" ]]; then
+    rm -rf "$RENDER_DIR"
+  fi
 }
-trap cleanup_temp_files EXIT
+
 
 escape_sed() {
   printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'
@@ -145,7 +240,7 @@ escape_sed() {
 render_template() {
   local template_file=$1
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$RENDER_DIR/$(basename "$template_file" .yaml).XXXXXX")"
   sed \
     -e "s/__INGRESS_BASE_DOMAIN__/$(escape_sed "$INGRESS_BASE_DOMAIN")/g" \
     -e "s/__INGRESS_BASE_DOMAIN_REGEX__/$(escape_sed "${INGRESS_BASE_DOMAIN//./\\.}")/g" \
@@ -157,7 +252,6 @@ render_template() {
     -e "s/__OIDC_GRAFANA_CLIENT_SECRET__/$(escape_sed "$OIDC_GRAFANA_CLIENT_SECRET")/g" \
     -e "s/__OIDC_ARGOCD_CLIENT_SECRET__/$(escape_sed "$OIDC_ARGOCD_CLIENT_SECRET")/g" \
     "$template_file" > "$tmp"
-  TEMP_FILES+=("$tmp")
   echo "$tmp"
 }
 
@@ -292,21 +386,6 @@ print_dns_quickstart() {
   echo ""
 }
 
-require_commands() {
-  local missing=()
-  for cmd in "$@"; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      missing+=("$cmd")
-    fi
-  done
-
-  if (( ${#missing[@]} > 0 )); then
-    echo "❌ Fehlende benötigte Tools: ${missing[*]}"
-    echo "👉 Bitte installiere sie und starte das Skript erneut."
-    exit 1
-  fi
-}
-
 detect_kind_subnet() {
   if ! command -v docker >/dev/null 2>&1; then
     return 1
@@ -375,8 +454,6 @@ spec:
 EOF
 }
 
-REQUIRED_COMMANDS=(kind kubectl helm openssl "$PYTHON_CMD")
-require_commands "${REQUIRED_COMMANDS[@]}"
 
 detected_subnet=""
 detected_range=""
@@ -513,7 +590,7 @@ check_pods_ready() {
       exit 1
     fi
 
-    echo "❌ Pods im Namespace '$namespace' sind noch nicht bereit. Nächster Versuch in ${interval}s..."
+    echo "⏳ Pods im Namespace '$namespace' sind noch nicht bereit. Nächster Versuch in ${interval}s..."
     sleep "$interval"
     attempt=$((attempt + 1))
   done
@@ -536,6 +613,10 @@ helm repo update metallb argo prometheus-community
 echo "==========================================="
 echo "🔧 1. Create KIND Cluster..."
 echo "==========================================="
+if [[ "$REBOOTSTRAP" == true ]] && kind get clusters | grep -Fxq "$CLUSTER_NAME"; then
+  echo "🗑️  Lösche bestehenden KIND Cluster '$CLUSTER_NAME' (Rebootstrap)..."
+  kind delete cluster --name "$CLUSTER_NAME"
+fi
 if kind get clusters | grep -Fxq "$CLUSTER_NAME"; then
   echo "ℹ️  KIND Cluster '$CLUSTER_NAME' existiert bereits, überspringe Erstellung."
 else
@@ -667,6 +748,7 @@ kubectl -n monitoring create secret generic grafana-oidc-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
+  --version "${KUBE_PROMETHEUS_STACK_VERSION}" \
   --create-namespace \
   --values "$(render_template "$SCRIPT_DIR/kube-prometheus-stack/values.yaml")"
 
